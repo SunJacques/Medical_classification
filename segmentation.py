@@ -1,21 +1,27 @@
 import argparse
 import torch
+import segmentation_models_pytorch.utils as utils
 from src.dataset import SegmentationDataset
 import wandb
 
-from src.unet import UNET
+from src.unet import UNet
 from src.accuracy import AccuracyTracker
-
 
 from tqdm import tqdm
 import numpy as np
 import albumentations as A
 import cv2
-from matplotlib.colors import ListedColormap
+from src.dice_score import dice_loss
+from src.dice_score import dice_coeff
+import torch.nn.functional as F
 
-accuracyTrackerTrain: AccuracyTracker = AccuracyTracker(n_classes=2)
-accuracyTrackerVal: AccuracyTracker = AccuracyTracker(n_classes=2)
-cmap = ListedColormap(['black', 'white'])
+class_set = wandb.Classes(
+    [
+        {"name": "peau", "id": 0},
+        {"name": "maladie", "id": 1},
+    ]
+)
+class_labels = {0: "peau", 1: "maladie"}
 IMG_SIZE = (512, 512)
 
 def train(model, args, train_loader):
@@ -27,13 +33,15 @@ def train(model, args, train_loader):
 
     loop = tqdm(train_loader)
     
-    for batch_idx, (inputs, labels) in enumerate(loop):
+    for batch_idx, (inputs, true_masks) in enumerate(loop):
         iteration+=1
         
-        inputs, labels = inputs.to(args.device), labels.to(args.device)
+        inputs, true_masks = inputs.to(args.device), true_masks.to(args.device)
 
-        outputs=model(inputs)
-        loss = args.criterion(outputs,labels)
+        masks_pred=model(inputs)
+        
+        loss = args.criterion(masks_pred,true_masks)
+        loss += dice_loss(F.sigmoid(masks_pred.squeeze(1)), true_masks.float())
         
         args.optimizer.zero_grad()
         loss.backward()
@@ -43,16 +51,9 @@ def train(model, args, train_loader):
         
         running_loss += loss.item()
 
-        outputs = outputs.cpu().data.max(1)[1].numpy()
-        labels = labels.cpu().data.max(1)[1].numpy()
-        outputs.astype(np.uint8)
-        labels.astype(np.uint8)
-
-        accuracyTrackerTrain.update(labels, outputs)
-
     train_loss = running_loss/iteration
     
-    args.sched.step()
+    # args.sched.step()
     print('Train Loss: %.3f'%(train_loss))
     return(train_loss)
 
@@ -60,68 +61,70 @@ def eval(model, args, val_loader):
     model.eval()
 
     running_loss = 0
-    running_time = 0
+    dice_score = 0
 
-    saved_images = np.zeros((3, IMG_SIZE, IMG_SIZE, 3))
-
+    saved_images = [None, None, None]
     iteration = 0
 
     loop = tqdm(val_loader)
 
-    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-
     with torch.no_grad():
-        for batch_idx, (inputs, labels) in enumerate(loop):
+        for batch_idx, (inputs, true_masks) in enumerate(loop):
             iteration+=1
             
-            inputs, labels = inputs.to(args.device), labels.to(args.device)
-
-            starter.record()
-            outputs=model(inputs)
-            ender.record()
+            inputs, true_masks = inputs.to(args.device), true_masks.to(args.device)
+            masks_pred=model(inputs)
 
             torch.cuda.synchronize()
 
-            running_time += starter.elapsed_time(ender)
-
-            loss = args.criterion(outputs,labels)
+            loss = args.criterion(masks_pred,true_masks)
             
             running_loss += loss.item()
 
-            outputs = outputs.cpu().data.max(1)[1].numpy()
-            labels = labels.cpu().data.max(1)[1].numpy()
+            masks_pred = masks_pred.argmax(dim=1)
+            true_masks = true_masks.argmax(dim=1)
 
-            outputs.astype(np.uint8)
-            labels.astype(np.uint8)
-
-            accuracyTrackerVal.update(labels, outputs)
-
+            masks_pred.to(torch.int)
+            true_masks.to(torch.int)
+            
+            dice_score += dice_coeff(masks_pred, true_masks, reduce_batch_first=False)
+            
             if(batch_idx == 0):
+                saved_images[0] = inputs[0].cpu().numpy().transpose(1, 2, 0)
                 
-                saved_images[0] = np.transpose(inputs.cpu().numpy()[0], (1, 2, 0))
-                label = labels[0].reshape(IMG_SIZE, IMG_SIZE, 1)
-                output = outputs[0].reshape(IMG_SIZE, IMG_SIZE, 1)
-                saved_images[1] = cmap(np.repeat(label[:, :, np.newaxis], 3, axis=2).reshape(IMG_SIZE, IMG_SIZE, 3))[:,:,0,:3]
-                saved_images[2] = cmap(np.repeat(output[:, :, np.newaxis], 3, axis=2).reshape(IMG_SIZE, IMG_SIZE, 3))[:,:,0,:3]
+                #Visualizing the output
+                output = masks_pred[0].cpu().numpy()
+                label = true_masks[0].cpu().numpy()
+                
+                image = np.zeros((512, 512), dtype=np.uint8)
+                for i in range(2):
+                    image[output == i] = i
+                saved_images[1] = image
+                
+                image = np.zeros((512, 512), dtype=np.uint8)
+                for i in range(2):
+                    image[label == i] = i
+                saved_images[2] = image
+
+                cv2.imwrite(('true_masks.png'), saved_images[0])
+                cv2.imwrite(('masks_pred.png'), saved_images[1])
 
     val_loss = running_loss/iteration
-    val_time = running_time/iteration
+    dice_score = dice_score/iteration
 
     print('Eval Loss: %.3f'%(val_loss))
-    return(val_loss, val_time, saved_images)
-
+    return(val_loss, dice_score, saved_images)
 
 def main():
     torch.cuda.empty_cache()
     # Training settings
-    parser = argparse.ArgumentParser(description='Information Removal at the bottleneck in Deep Neural Networks')
-    parser.add_argument('--batch-size', type=int, default=32, metavar='N', help='input batch size for training (default: 32)')
+    parser = argparse.ArgumentParser(description='PyTorch Segmentation')
+    parser.add_argument('--batch-size', type=int, default=32, metavar='BS', help='input batch size for training (default: 32)')
     parser.add_argument('--epochs', type=int, default=100, metavar='N', help='number of epochs to train (default: 100)')
     parser.add_argument('--lr', type=float, default=1e-4, metavar='LR', help='learning rate (default: 0.0001)')
-    parser.add_argument('--weight_decay', type=float, default=0.00005)
-    parser.add_argument('--dev', default="cuda:0")
-    parser.add_argument('--momentum-sgd', type=float, default=0.9, metavar='M', help='Momentum')
-    parser.add_argument('--datapath', default='LPCVCDataset')
+    parser.add_argument('--weight_decay', type=float, default=0.0005)
+    parser.add_argument('--dev', default="cuda:1")
+    parser.add_argument('--momentum-sgd', type=float, default=None, metavar='M', help='Momentum')
     parser.add_argument('--name', default='RUN')
     args = parser.parse_args()
 
@@ -129,26 +132,23 @@ def main():
     if args.dev != "cpu":
         torch.cuda.set_device(args.device)
 
-    model = UNET(in_channels=3, out_channels=14, features=[64, 128, 256, 512]).to(args.device)
+    model = UNet(nclass=2, in_chans=3).to(args.device)
 
-    # transform = A.Compose([A.Resize(width=IMG_SIZE[1], height=IMG_SIZE[0], interpolation=cv2.INTER_NEAREST)])
-
-    # aug_data = A.Compose([
-    #     A.Resize(width=IMG_SIZE[1], height=IMG_SIZE[0], interpolation=cv2.INTER_NEAREST),
-    #     A.HorizontalFlip(p=0.5),
-    #     A.VerticalFlip(p=0.5),
-    #     A.Rotate(limit=[-60, 60], p=0.8, interpolation=cv2.INTER_NEAREST),
-    #     A.RandomBrightnessContrast(brightness_limit=[-0.2, 0.2], contrast_limit=0.2, p=0.3),
-    # ], p=1.0)
-
+    aug_data = A.Compose([
+        A.HorizontalFlip(p=0.5),
+        A.VerticalFlip(p=0.5),
+        A.Rotate(limit=[-60, 60], p=0.8, interpolation=cv2.INTER_NEAREST),
+        # A.RandomBrightnessContrast(brightness_limit=[-0.2, 0.2], contrast_limit=0.2, p=0.3),
+    ], p=1)
     
     train_dataset = SegmentationDataset(
-        datapath='/home/infres/nvernier-22/project/LPCVC-2023/Kaggle/Dataset/Train',
-        # transform=aug_data,
+        datapath='/home/infres/jsun-22/Documents/IMA205/Medical_classification/Dataset/Train_seg',
+        # augmentation=aug_data,
         train=True
     )
+    
     val_dataset = SegmentationDataset(
-        datapath='/home/infres/nvernier-22/project/LPCVC-2023/Kaggle/Dataset/Test',
+        datapath='/home/infres/jsun-22/Documents/IMA205/Medical_classification/Dataset/Test_seg',
         # transform=transform, 
         train=False
     )
@@ -156,11 +156,11 @@ def main():
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
 
-    args.criterion = torch.nn.CrossEntropyLoss()
-    #args.criterion = utils.losses.DiceLoss()
+    args.criterion = torch.nn.BCEWithLogitsLoss()
     
     args.optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     #args.optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(args.optimizer, 'max', patience=5) 
     
     #scheduler = torch.optim.lr_scheduler.ExponentialLR(args.optimizer, gamma=0.1)
     #args.sched = torch.optim.lr_scheduler.OneCycleLR(args.optimizer, 0.001, total_steps=len(train_loader)*args.epochs)
@@ -180,29 +180,42 @@ def main():
     wandb.config.val_dataset_length = len(val_dataset)
     wandb.config.optmizer = "ADAMW"
     wandb.config.momentum = args.momentum_sgd
-
+    
     best_dice = 0
 
     for epoch in range(1, args.epochs+1):
-        accuracyTrackerTrain.reset()
-        accuracyTrackerVal.reset()
         print('\nEpoch : %d'%epoch)
         train_loss = train(model, args, train_loader)
-        val_loss, val_time, saved_images = eval(model, args, val_loader)
-
-        input_image, target_image, pred_image = saved_images[0], saved_images[1], saved_images[2]
-        wandb.log(
-            {"train_acc": accuracyTrackerTrain.get_scores(), "train_loss": train_loss, "train_dice": accuracyTrackerTrain.get_mean_dice(),
-            "val_acc": accuracyTrackerVal.get_scores(), "val_loss": val_loss, "val_dice": accuracyTrackerVal.get_mean_dice(), "inf_time": val_time,
-            "input_image" : wandb.Image(input_image), "target_image" : wandb.Image(target_image), "pred_image" : wandb.Image(pred_image),
-            "learning rate": args.sched.get_last_lr()[-1]
-            })
-
-        # if(accuracyTrackerVal.get_mean_dice() > best_dice):
-        #     torch.save(model, 'checkpoint/' + args.name+'_'+str(epoch)+'_dice_'+str(accuracyTrackerVal.get_mean_dice())+'.pth')
-        #     best_dice = accuracyTrackerVal.get_mean_dice()
         
-        #scheduler.step()
+        if epoch % 5 == 1:
+            val_loss, dice_score, saved_images = eval(model, args, val_loader)
+
+            input, pred_image, target_image = saved_images[0], saved_images[1], saved_images[2]
+
+        wandb.log({
+            "train_loss": train_loss, 
+            
+            "val_loss": val_loss, 
+            "dice_score": dice_score,
+            
+            "Segmentation" : wandb.Image(
+                input,
+                masks={
+                    "predictions": {"mask_data": pred_image, "class_labels": class_labels}, 
+                    "ground_truth": {"mask_data": target_image, "class_labels": class_labels}
+                    },
+                classes=class_set
+                ),
+            "prediction" : wandb.Image(pred_image),
+            "target" : wandb.Image(target_image),
+            # "learning rate": scheduler.get_lr()[-1]
+            })
+            
+        if epoch % 20 == 0 and (dice_score > best_dice):
+            torch.save(model, 'checkpoint/' + args.name + '_' + str(epoch)+'_dice_' + str(dice_score)+'.pth')
+            best_dice = dice_score
+
+        # scheduler.step(dice_score)
 
 wandb.finish()
 

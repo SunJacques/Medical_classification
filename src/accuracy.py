@@ -1,6 +1,5 @@
 import numpy
 
-
 class AccuracyTracker(object):
     def __init__(self, n_classes):
         self.n_classes = n_classes
@@ -43,9 +42,5 @@ class AccuracyTracker(object):
         self.fwavacc = (freq[freq > 0] * dice[freq > 0]).sum()
         self.cls_dice = dict(zip(range(self.n_classes), dice))
 
-        return {
-            "Overall Acc: \t": self.acc,
-            "Mean Acc : \t": self.acc_cls,
-            "FreqW Acc : \t": self.fwavacc,
-            "Mean Dice : \t": self.mean_dice,
-        }
+        return self.acc, self.mean_dice
+

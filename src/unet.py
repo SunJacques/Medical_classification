@@ -1,119 +1,83 @@
 import torch
 import torch.nn as nn
 
-class conv_block(nn.Module):
-    def __init__(self, in_c, out_c):  #in_c = how many feature channel the input has/ out_c = how many do we want
+class EncoderBlock(nn.Module):        
+    # Consists of Conv -> ReLU -> MaxPool
+    def __init__(self, in_chans, out_chans, layers=2, sampling_factor=2, padding="same"):
         super().__init__()
-
-        ### Layers definition
-
-
-        # Convolution layer
-        self.conv1 = nn.Conv2d(in_c, out_c, kernel_size=3, padding=1) #change kernel_size if we want to use a 2*1 or other
-
-        # Best normalization
-        self.bn1 = nn.BatchNorm2d(out_c)
-
-
-        self.conv2 = nn.Conv2d(out_c, out_c, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_c)
-
-        # ReLu
-        self.relu = nn.ReLU()
-
-    # First Layer
-
-    # Convolution Block
-    def forward(self, inputs):
-        x = self.conv1(inputs)
-        x = self.bn1(x)
-        x = self.relu(x)
-
-        x = self.conv2(x)
-        x = self.bn2(x)
-        x = self.relu(x)
-
-        return x
-
-#Encoder Block
-class encoder_block(nn.Module):
-    def __init__(self, in_c, out_c):
-        super().__init__()
-
-        self.conv = conv_block(in_c, out_c)
-        # Max Pooling
-        self.pool = nn.MaxPool2d((2,2))
+        self.encoder = nn.ModuleList()
+        self.encoder.append(nn.Conv2d(in_chans, out_chans, 3, 1, padding=padding))
+        self.encoder.append(nn.ReLU())
+        for _ in range(layers-1):
+            self.encoder.append(nn.Conv2d(out_chans, out_chans, 3, 1, padding=padding))
+            self.encoder.append(nn.ReLU())
+        self.mp = nn.MaxPool2d(sampling_factor)
         
-    def forward(self, inputs):
-        x = self.conv(inputs)
-        p = self.pool(x)
+    def forward(self, x):
+        for enc in self.encoder:
+            x = enc(x)
+        mp_out = self.mp(x)
+        return mp_out, x
 
-        return x, p 
-
-#Decoder Block
-class decoder_block(nn.Module):
-    def __init__(self, in_c, out_c):
+class DecoderBlock(nn.Module):
+    # Consists of 2x2 transposed convolution -> Conv -> relu
+    def __init__(self, in_chans, out_chans, layers=2, skip_connection=True, sampling_factor=2, padding="same"):
         super().__init__()
+        skip_factor = 1 if skip_connection else 2
+        self.decoder = nn.ModuleList()
+        self.tconv = nn.ConvTranspose2d(in_chans, in_chans//2, sampling_factor, sampling_factor)
 
-        # Up convolution
-        self.up = nn.ConvTranspose2d(in_c, out_c, kernel_size=2, stride=2, padding=0) #cf paper for kernel_size, stride: we want to doublethe height
-        self.conv = conv_block(out_c+out_c, out_c)
+        self.decoder.append(nn.Conv2d(in_chans//skip_factor, out_chans, 3, 1, padding=padding))
+        self.decoder.append(nn.ReLU())
 
-    def forward(self, inputs, skip): #skip connection
-        x = self.up(inputs)
-        # Concatenation (channels)
-        x = torch.cat([x, skip], axis=1)
-        x = self.conv(x)
+        for _ in range(layers-1):
+            self.decoder.append(nn.Conv2d(out_chans, out_chans, 3, 1, padding=padding))
+            self.decoder.append(nn.ReLU())
+
+        self.skip_connection = skip_connection
+        self.padding = padding
+        
+    def forward(self, x, enc_features=None):
+        x = self.tconv(x)
+        if self.skip_connection:
+            if self.padding != "same":
+                # Crop the enc_features to the same size as input
+                w = x.size(-1)
+                c = (enc_features.size(-1) - w) // 2
+                enc_features = enc_features[:,:,c:c+w,c:c+w]
+            x = torch.cat((enc_features, x), dim=1)
+        for dec in self.decoder:
+            x = dec(x)
         return x
 
-class UNET(nn.Module):
-    def __init__(self):
+class UNet(nn.Module):
+    def __init__(self, nclass=2, in_chans=3, depth=5, layers=2, sampling_factor=2, skip_connection=True, padding="same"):
         super().__init__()
+        self.encoder = nn.ModuleList()
+        self.decoder = nn.ModuleList()
 
-        # Encoder Blocks
+        out_chans = 64
+        for _ in range(depth):
+            self.encoder.append(EncoderBlock(in_chans, out_chans, layers, sampling_factor, padding))
+            in_chans, out_chans = out_chans, out_chans*2
 
-        self.e1 = encoder_block(3,64)
-        self.e2 = encoder_block(64,128)
-        self.e3 = encoder_block(128, 256)
-        self.e4 = encoder_block(256, 512)
+        out_chans = in_chans // 2
+        for _ in range(depth-1):
+            self.decoder.append(DecoderBlock(in_chans, out_chans, layers, skip_connection, sampling_factor, padding))
+            in_chans, out_chans = out_chans, out_chans//2
+        # Add a 1x1 convolution to produce final classes
+        self.logits = nn.Conv2d(in_chans, nclass, 1, 1)
 
-        # Botleneck Block
+    def forward(self, x):
+        encoded = []
+        for enc in self.encoder:
+            x, enc_output = enc(x)
+            encoded.append(enc_output)
+            
+        x = encoded.pop()
+        for dec in self.decoder:
+            enc_output = encoded.pop()
+            x = dec(x, enc_output)
 
-        self.b = conv_block(512,1024)
-
-        # Decoder Block
-
-        self.d1 = decoder_block(1024, 512)
-        self.d2 = decoder_block(512, 256)
-        self.d3 = decoder_block(256, 128)
-        self.d4 = decoder_block(128, 64)
-
-        # Classifier
-
-        self.outputs = nn.Conv2d(64, 14, kernel_size=1, padding=0)
-
-
-    def forward(self, inputs):
-
-        s1, p1 = self.e1(inputs)
-        s2, p2 = self.e2(p1) # p1 is  the output of the first encoder
-        s3, p3 = self.e3(p2) 
-        s4, p4 = self.e4(p3) 
-
-        b = self.b(p4)  
-
-        d1 = self.d1(b, s4)
-        d2 = self.d2(d1, s3)
-        d3 = self.d3(d2, s2)
-        d4 = self.d4(d3, s1)
-
-        outputs = self.outputs(d4)
-        return outputs
-
-### Test
-
-if __name__ == "__main__":
-    inputs = torch.randn((10, 3,512,512))
-    model = UNET()
-    y = model(inputs)
-    print(y.shape)
+        # Return the logits
+        return self.logits(x)
