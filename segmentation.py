@@ -54,10 +54,9 @@ def eval(model, args, val_loader):
     model.eval()
 
     running_loss = 0
-
     saved_images = [None,None,None]
-
     iteration = 0
+    dice_score = 0
 
     loop = tqdm(val_loader)
 
