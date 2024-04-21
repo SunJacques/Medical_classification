@@ -184,7 +184,7 @@ def main():
         wandb.log({
             "train_loss": train_loss, 
             "val_loss": val_loss, 
-            "val_dice": dice_score, 
+            "dice_score": dice_score, 
             
             "input_image" : wandb.Image(input_image,
                             masks={"predictions": {"mask_data": pred_image, "class_labels": class_label},
