@@ -117,7 +117,6 @@ def main():
         v2.RandomHorizontalFlip(p=0.5),
         v2.RandomVerticalFlip(p=0.5),
         v2.RandomRotation(degrees=[-60, 60]),
-        v2.ToDtype(torch.float32, scale=True),
     ])
     
     train_dataset = SegmentationDataset(

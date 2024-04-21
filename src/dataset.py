@@ -38,10 +38,12 @@ class SegmentationDataset(Dataset):
         mask = T.ToTensor()(mask)
         
         if self.augmentation:
-            img,mask = self.augmentation()(img, mask)
+            img, mask = self.augmentation(img, mask)
+            img = img
+            mask = mask
 
         if self.preprocessing:
-            img,mask = self.preprocessing()(img, mask)
+            img,mask = self.preprocessing(img, mask)
         
         
         return img, mask
