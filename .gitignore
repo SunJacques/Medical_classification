@@ -2,3 +2,5 @@ Dataset/
 wandb/
 .vscode/
 __pycache__/
+nohup.out
+checkpoints/

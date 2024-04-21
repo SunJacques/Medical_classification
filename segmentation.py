@@ -1,27 +1,22 @@
 import argparse
 import torch
-import segmentation_models_pytorch.utils as utils
 from src.dataset import SegmentationDataset
 import wandb
 
 from src.unet import UNet
-from src.accuracy import AccuracyTracker
 
 from tqdm import tqdm
 import numpy as np
 import albumentations as A
 import cv2
-from src.dice_score import dice_loss
-from src.dice_score import dice_coeff
+from src.dice_score import dice_coeff, dice_loss
 import torch.nn.functional as F
 
-class_set = wandb.Classes(
-    [
-        {"name": "peau", "id": 0},
-        {"name": "maladie", "id": 1},
-    ]
-)
-class_labels = {0: "peau", 1: "maladie"}
+class_label = {
+    0: 'peau',
+    1: 'maladie',
+}
+
 IMG_SIZE = (512, 512)
 
 def train(model, args, train_loader):
@@ -39,8 +34,7 @@ def train(model, args, train_loader):
         inputs, true_masks = inputs.to(args.device), true_masks.to(args.device)
 
         masks_pred=model(inputs)
-        
-        loss = args.criterion(masks_pred,true_masks)
+        loss = args.criterion(masks_pred.squeeze(1), true_masks.float())
         loss += dice_loss(F.sigmoid(masks_pred.squeeze(1)), true_masks.float())
         
         args.optimizer.zero_grad()
@@ -53,7 +47,6 @@ def train(model, args, train_loader):
 
     train_loss = running_loss/iteration
     
-    # args.sched.step()
     print('Train Loss: %.3f'%(train_loss))
     return(train_loss)
 
@@ -61,54 +54,49 @@ def eval(model, args, val_loader):
     model.eval()
 
     running_loss = 0
-    dice_score = 0
 
-    saved_images = [None, None, None]
+    saved_images = [None,None,None]
+
     iteration = 0
 
     loop = tqdm(val_loader)
 
     with torch.no_grad():
         for batch_idx, (inputs, true_masks) in enumerate(loop):
-            iteration+=1
+            iteration += 1
             
             inputs, true_masks = inputs.to(args.device), true_masks.to(args.device)
             masks_pred=model(inputs)
 
-            torch.cuda.synchronize()
 
             loss = args.criterion(masks_pred,true_masks)
-            
             running_loss += loss.item()
 
-            masks_pred = masks_pred.argmax(dim=1)
-            true_masks = true_masks.argmax(dim=1)
-
+            masks_pred = masks_pred.argmax(1)
+            true_masks = true_masks.argmax(1)
             masks_pred.to(torch.int)
             true_masks.to(torch.int)
-            
-            dice_score += dice_coeff(masks_pred, true_masks, reduce_batch_first=False)
-            
+
+            dice_score = dice_coeff(masks_pred, true_masks, reduce_batch_first=False)
+
             if(batch_idx == 0):
-                saved_images[0] = inputs[0].cpu().numpy().transpose(1, 2, 0)
+                torch.cuda.synchronize()
                 
-                #Visualizing the output
-                output = masks_pred[0].cpu().numpy()
-                label = true_masks[0].cpu().numpy()
+                saved_images[0] = inputs[1].cpu().numpy().transpose(1, 2, 0)
+                label = true_masks[1].cpu().numpy()
+                output = masks_pred[1].cpu().numpy()
                 
-                image = np.zeros((512, 512), dtype=np.uint8)
+                image = np.zeros((IMG_SIZE[0], IMG_SIZE[1]))
                 for i in range(2):
-                    image[output == i] = i
+                    image[:, :] = label == i
                 saved_images[1] = image
+                cv2.imwrite('label.png', image)
                 
-                image = np.zeros((512, 512), dtype=np.uint8)
+                image = np.zeros((IMG_SIZE[0], IMG_SIZE[1]))
                 for i in range(2):
-                    image[label == i] = i
+                    image[:, :] = output == i
                 saved_images[2] = image
-
-                cv2.imwrite(('true_masks.png'), saved_images[0])
-                cv2.imwrite(('masks_pred.png'), saved_images[1])
-
+                
     val_loss = running_loss/iteration
     dice_score = dice_score/iteration
 
@@ -118,13 +106,14 @@ def eval(model, args, val_loader):
 def main():
     torch.cuda.empty_cache()
     # Training settings
-    parser = argparse.ArgumentParser(description='PyTorch Segmentation')
-    parser.add_argument('--batch-size', type=int, default=32, metavar='BS', help='input batch size for training (default: 32)')
+    parser = argparse.ArgumentParser(description='Information Removal at the bottleneck in Deep Neural Networks')
+    parser.add_argument('--batch-size', type=int, default=32, metavar='N', help='input batch size for training (default: 32)')
     parser.add_argument('--epochs', type=int, default=100, metavar='N', help='number of epochs to train (default: 100)')
-    parser.add_argument('--lr', type=float, default=1e-4, metavar='LR', help='learning rate (default: 0.0001)')
-    parser.add_argument('--weight_decay', type=float, default=0.0005)
+    parser.add_argument('--lr', type=float, default=5e-4, metavar='LR', help='learning rate (default: 0.0001)')
+    parser.add_argument('--weight_decay', type=float, default=0.00005)
     parser.add_argument('--dev', default="cuda:1")
-    parser.add_argument('--momentum-sgd', type=float, default=None, metavar='M', help='Momentum')
+    parser.add_argument('--momentum-sgd', type=float, default=0.9, metavar='M', help='Momentum')
+    parser.add_argument('--datapath', default='LPCVCDataset')
     parser.add_argument('--name', default='RUN')
     args = parser.parse_args()
 
@@ -132,21 +121,24 @@ def main():
     if args.dev != "cpu":
         torch.cuda.set_device(args.device)
 
-    model = UNet(nclass=2, in_chans=3).to(args.device)
+    model = UNet(in_chans=3, nclass=2).to(args.device)
+
+    # transform = A.Compose([A.Resize(width=IMG_SIZE[1], height=IMG_SIZE[0], interpolation=cv2.INTER_NEAREST)])
 
     aug_data = A.Compose([
+        A.Resize(width=IMG_SIZE[1], height=IMG_SIZE[0], interpolation=cv2.INTER_NEAREST),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.Rotate(limit=[-60, 60], p=0.8, interpolation=cv2.INTER_NEAREST),
-        # A.RandomBrightnessContrast(brightness_limit=[-0.2, 0.2], contrast_limit=0.2, p=0.3),
-    ], p=1)
+        A.RandomBrightnessContrast(brightness_limit=[-0.2, 0.2], contrast_limit=0.2, p=0.3),
+    ], p=1.0)
+
     
     train_dataset = SegmentationDataset(
         datapath='/home/infres/jsun-22/Documents/IMA205/Medical_classification/Dataset/Train_seg',
-        # augmentation=aug_data,
+        augmentation = aug_data,
         train=True
     )
-    
     val_dataset = SegmentationDataset(
         datapath='/home/infres/jsun-22/Documents/IMA205/Medical_classification/Dataset/Test_seg',
         # transform=transform, 
@@ -157,10 +149,10 @@ def main():
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
 
     args.criterion = torch.nn.BCEWithLogitsLoss()
+    #args.criterion = utils.losses.DiceLoss()
     
     args.optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    #args.optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(args.optimizer, 'max', patience=5) 
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(args.optimizer, 'max', patience=8)
     
     #scheduler = torch.optim.lr_scheduler.ExponentialLR(args.optimizer, gamma=0.1)
     #args.sched = torch.optim.lr_scheduler.OneCycleLR(args.optimizer, 0.001, total_steps=len(train_loader)*args.epochs)
@@ -180,44 +172,36 @@ def main():
     wandb.config.val_dataset_length = len(val_dataset)
     wandb.config.optmizer = "ADAMW"
     wandb.config.momentum = args.momentum_sgd
-    
+
     best_dice = 0
 
     for epoch in range(1, args.epochs+1):
         print('\nEpoch : %d'%epoch)
         train_loss = train(model, args, train_loader)
-        
-        if epoch % 5 == 1:
-            val_loss, dice_score, saved_images = eval(model, args, val_loader)
+        val_loss,dice_score, saved_images = eval(model, args, val_loader)
 
-            input, pred_image, target_image = saved_images[0], saved_images[1], saved_images[2]
-
+        input_image, target_image, pred_image = saved_images[0], saved_images[1], saved_images[2]
         wandb.log({
             "train_loss": train_loss, 
-            
             "val_loss": val_loss, 
-            "dice_score": dice_score,
+            "val_dice": dice_score, 
             
-            "Segmentation" : wandb.Image(
-                input,
-                masks={
-                    "predictions": {"mask_data": pred_image, "class_labels": class_labels}, 
-                    "ground_truth": {"mask_data": target_image, "class_labels": class_labels}
-                    },
-                classes=class_set
-                ),
-            "prediction" : wandb.Image(pred_image),
-            "target" : wandb.Image(target_image),
-            # "learning rate": scheduler.get_lr()[-1]
+            "input_image" : wandb.Image(input_image,
+                            masks={"predictions": {"mask_data": pred_image, "class_labels": class_label},
+                                    "ground_truth": {"mask_data": target_image, "class_labels": class_label}}
+                            ), 
+            "target_image" : wandb.Image(target_image), 
+            "pred_image" : wandb.Image(pred_image),
+            "learning rate": args.optimizer.param_groups[0]['lr']
             })
-            
-        if epoch % 20 == 0 and (dice_score > best_dice):
-            torch.save(model, 'checkpoint/' + args.name + '_' + str(epoch)+'_dice_' + str(dice_score)+'.pth')
-            best_dice = dice_score
 
-        # scheduler.step(dice_score)
+        if epoch > 20 and (dice_score > best_dice):
+             torch.save(model, 'checkpoint/' + args.name + '.pth')
+             best_dice = dice_score
 
-wandb.finish()
+        scheduler.step()
+
+    wandb.finish()
 
 if __name__ == '__main__':
     main()
