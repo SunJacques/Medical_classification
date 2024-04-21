@@ -76,7 +76,7 @@ def eval(model, args, val_loader):
             masks_pred.to(torch.int)
             true_masks.to(torch.int)
 
-            dice_score = dice_coeff(masks_pred, true_masks, reduce_batch_first=False)
+            dice_score += dice_coeff(masks_pred, true_masks, reduce_batch_first=False)
 
             if(batch_idx == 0):
                 torch.cuda.synchronize()
@@ -134,29 +134,20 @@ def main():
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
 
     args.criterion = torch.nn.BCEWithLogitsLoss()
-    #args.criterion = utils.losses.DiceLoss()
     
     args.optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(args.optimizer, 'max', patience=8)
-    
-    #scheduler = torch.optim.lr_scheduler.ExponentialLR(args.optimizer, gamma=0.1)
-    #args.sched = torch.optim.lr_scheduler.OneCycleLR(args.optimizer, 0.001, total_steps=len(train_loader)*args.epochs)
-    # args.scaler = torch.cuda.amp.GradScaler()
-    # args.sched = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-    #      args.optimizer, T_0=1, T_mult=2, eta_min=5e-5,
-    # )
-    #args.sched = torch.optim.lr_scheduler.StepLR(args.optimizer,step_size=500,gamma=0.1,verbose=True)
 
-    # wandb.init(project="IMA205")
-    # wandb.run.name = args.name
-    # wandb.config.epochs = args.epochs
-    # wandb.config.batch_size = args.batch_size
-    # wandb.config.learning_rate = args.lr
-    # wandb.config.weight_decay = args.weight_decay
-    # wandb.config.train_dataset_length = len(train_dataset)
-    # wandb.config.val_dataset_length = len(val_dataset)
-    # wandb.config.optmizer = "ADAMW"
-    # wandb.config.momentum = args.momentum_sgd
+    wandb.init(project="IMA205")
+    wandb.run.name = args.name
+    wandb.config.epochs = args.epochs
+    wandb.config.batch_size = args.batch_size
+    wandb.config.learning_rate = args.lr
+    wandb.config.weight_decay = args.weight_decay
+    wandb.config.train_dataset_length = len(train_dataset)
+    wandb.config.val_dataset_length = len(val_dataset)
+    wandb.config.optmizer = "ADAMW"
+    wandb.config.momentum = args.momentum_sgd
 
     best_dice = 0
 
