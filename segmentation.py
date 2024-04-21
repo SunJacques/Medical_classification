@@ -199,7 +199,7 @@ def main():
              torch.save(model, 'checkpoint/' + args.name + '.pth')
              best_dice = dice_score
 
-        scheduler.step()
+        scheduler.step(dice_score)
 
     wandb.finish()
 
