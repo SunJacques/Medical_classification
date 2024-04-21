@@ -7,7 +7,7 @@ from src.unet import UNet
 
 from tqdm import tqdm
 import numpy as np
-import albumentations as A
+from torchvision.transforms import v2, InterpolationMode
 import cv2
 from src.dice_score import dice_coeff, dice_loss
 import torch.nn.functional as F
@@ -68,7 +68,6 @@ def eval(model, args, val_loader):
             inputs, true_masks = inputs.to(args.device), true_masks.to(args.device)
             masks_pred=model(inputs)
 
-
             loss = args.criterion(masks_pred,true_masks)
             running_loss += loss.item()
 
@@ -83,19 +82,8 @@ def eval(model, args, val_loader):
                 torch.cuda.synchronize()
                 
                 saved_images[0] = inputs[1].cpu().numpy().transpose(1, 2, 0)
-                label = true_masks[1].cpu().numpy()
-                output = masks_pred[1].cpu().numpy()
-                
-                image = np.zeros((IMG_SIZE[0], IMG_SIZE[1]))
-                for i in range(2):
-                    image[:, :] = label == i
-                saved_images[1] = image
-                cv2.imwrite('label.png', image)
-                
-                image = np.zeros((IMG_SIZE[0], IMG_SIZE[1]))
-                for i in range(2):
-                    image[:, :] = output == i
-                saved_images[2] = image
+                saved_images[1] = true_masks[1].cpu().numpy()
+                saved_images[2] = masks_pred[1].cpu().numpy()
                 
     val_loss = running_loss/iteration
     dice_score = dice_score/iteration
@@ -124,15 +112,13 @@ def main():
     model = UNet(in_chans=3, nclass=2).to(args.device)
 
     # transform = A.Compose([A.Resize(width=IMG_SIZE[1], height=IMG_SIZE[0], interpolation=cv2.INTER_NEAREST)])
-
-    aug_data = A.Compose([
-        A.Resize(width=IMG_SIZE[1], height=IMG_SIZE[0], interpolation=cv2.INTER_NEAREST),
-        A.HorizontalFlip(p=0.5),
-        A.VerticalFlip(p=0.5),
-        A.Rotate(limit=[-60, 60], p=0.8, interpolation=cv2.INTER_NEAREST),
-        A.RandomBrightnessContrast(brightness_limit=[-0.2, 0.2], contrast_limit=0.2, p=0.3),
-    ], p=1.0)
-
+    
+    aug_data = v2.Compose([
+        v2.RandomHorizontalFlip(p=0.5),
+        v2.RandomVerticalFlip(p=0.5),
+        v2.RandomRotation(degrees=[-60, 60]),
+        v2.ToDtype(torch.float32, scale=True),
+    ])
     
     train_dataset = SegmentationDataset(
         datapath='/home/infres/jsun-22/Documents/IMA205/Medical_classification/Dataset/Train_seg',
@@ -162,16 +148,16 @@ def main():
     # )
     #args.sched = torch.optim.lr_scheduler.StepLR(args.optimizer,step_size=500,gamma=0.1,verbose=True)
 
-    wandb.init(project="IMA205")
-    wandb.run.name = args.name
-    wandb.config.epochs = args.epochs
-    wandb.config.batch_size = args.batch_size
-    wandb.config.learning_rate = args.lr
-    wandb.config.weight_decay = args.weight_decay
-    wandb.config.train_dataset_length = len(train_dataset)
-    wandb.config.val_dataset_length = len(val_dataset)
-    wandb.config.optmizer = "ADAMW"
-    wandb.config.momentum = args.momentum_sgd
+    # wandb.init(project="IMA205")
+    # wandb.run.name = args.name
+    # wandb.config.epochs = args.epochs
+    # wandb.config.batch_size = args.batch_size
+    # wandb.config.learning_rate = args.lr
+    # wandb.config.weight_decay = args.weight_decay
+    # wandb.config.train_dataset_length = len(train_dataset)
+    # wandb.config.val_dataset_length = len(val_dataset)
+    # wandb.config.optmizer = "ADAMW"
+    # wandb.config.momentum = args.momentum_sgd
 
     best_dice = 0
 
@@ -196,7 +182,7 @@ def main():
             })
 
         if epoch > 20 and (dice_score > best_dice):
-             torch.save(model, 'checkpoint/' + args.name + '.pth')
+             torch.save(model.state_dict(), 'checkpoints/' + args.name + '.pth')
              best_dice = dice_score
 
         scheduler.step(dice_score)

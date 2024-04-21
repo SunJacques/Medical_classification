@@ -32,20 +32,17 @@ class SegmentationDataset(Dataset):
             img = cv2.imread(self.datapath + '/img' + str(idx) + '.jpg')
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             mask = cv2.imread(self.datapath + '/img' + str(idx) + '_seg.jpg', cv2.IMREAD_GRAYSCALE) 
-        
-        if self.augmentation:
-            sample = self.augmentation(image=img, mask=mask)
-            img = sample['image']
-            mask = sample['mask']
-
-        if self.preprocessing:
-            sample = self.preprocessing(image=img, mask=mask)
-            img = sample['image']
-            mask = sample['mask']
-        
+            
         img = T.ToTensor()(img)
         mask = self.onehot(mask)
         mask = T.ToTensor()(mask)
+        
+        if self.augmentation:
+            img,mask = self.augmentation()(img, mask)
+
+        if self.preprocessing:
+            img,mask = self.preprocessing()(img, mask)
+        
         
         return img, mask
     
