@@ -84,6 +84,7 @@ def eval(model, args, val_loader):
                 saved_images[1] = true_masks[1].cpu().numpy()
                 saved_images[2] = masks_pred[1].cpu().numpy()
                 
+                
     val_loss = running_loss/iteration
     dice_score = dice_score/iteration
 
@@ -112,15 +113,15 @@ def main():
 
     # transform = A.Compose([A.Resize(width=IMG_SIZE[1], height=IMG_SIZE[0], interpolation=cv2.INTER_NEAREST)])
     
-    aug_data = v2.Compose([
-        v2.RandomHorizontalFlip(p=0.5),
-        v2.RandomVerticalFlip(p=0.5),
-        v2.RandomRotation(degrees=[-60, 60]),
-    ])
+    # aug_data = v2.Compose([
+    #     v2.RandomHorizontalFlip(p=0.5),
+    #     v2.RandomVerticalFlip(p=0.5),
+    #     v2.RandomRotation(degrees=[-60, 60]),
+    # ])
     
     train_dataset = SegmentationDataset(
         datapath='/home/infres/jsun-22/Documents/IMA205/Medical_classification/Dataset/Train_seg',
-        augmentation = aug_data,
+        # augmentation = aug_data,
         train=True
     )
     val_dataset = SegmentationDataset(
@@ -135,7 +136,7 @@ def main():
     args.criterion = torch.nn.BCEWithLogitsLoss()
     
     args.optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(args.optimizer, 'max', patience=8)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(args.optimizer, T_0=10, T_mult=2, eta_min=1e-5)
 
     wandb.init(project="IMA205")
     wandb.run.name = args.name
@@ -147,8 +148,6 @@ def main():
     wandb.config.val_dataset_length = len(val_dataset)
     wandb.config.optmizer = "ADAMW"
     wandb.config.momentum = args.momentum_sgd
-
-    best_dice = 0
 
     for epoch in range(1, args.epochs+1):
         print('\nEpoch : %d'%epoch)
@@ -170,9 +169,13 @@ def main():
             "learning rate": args.optimizer.param_groups[0]['lr']
             })
 
-        if epoch > 20 and (dice_score > best_dice):
-             torch.save(model.state_dict(), 'checkpoints/' + args.name + '.pth')
-             best_dice = dice_score
+        if epoch > 30 and epoch % 20 == 0:
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': args.optimizer.state_dict(),
+            }, 'checkpoints/' + args.name + "_epoch" + str(epoch) +'.pth')
+            
 
         scheduler.step(dice_score)
 
