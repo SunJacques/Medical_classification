@@ -4,3 +4,5 @@ wandb/
 __pycache__/
 nohup.out
 checkpoints/
+Simple+BN_epoch150.pth
+Submission/

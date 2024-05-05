@@ -2,13 +2,9 @@ import argparse
 import torch
 from src.dataset import SegmentationDataset
 import wandb
-
 from src.unet import UNet
-
 from tqdm import tqdm
-import numpy as np
-from torchvision.transforms import v2, InterpolationMode
-import cv2
+from torchvision.transforms import v2
 from src.dice_score import dice_coeff, dice_loss
 import torch.nn.functional as F
 
@@ -19,21 +15,20 @@ class_label = {
 
 IMG_SIZE = (512, 512)
 
-def train(model, args, train_loader):
+def train(model, args, train_loader,epoch):
     model.train()
     model.to(args.device)
 
     running_loss = 0
     iteration = 0
-
+    iters = len(train_loader)
     loop = tqdm(train_loader)
     
     for batch_idx, (inputs, true_masks) in enumerate(loop):
         iteration+=1
         
         inputs, true_masks = inputs.to(args.device), true_masks.to(args.device)
-
-        masks_pred=model(inputs)
+        masks_pred = model(inputs)
         loss = args.criterion(masks_pred.squeeze(1), true_masks.float())
         loss += dice_loss(F.sigmoid(masks_pred.squeeze(1)), true_masks.float())
         
@@ -63,11 +58,12 @@ def eval(model, args, val_loader):
     with torch.no_grad():
         for batch_idx, (inputs, true_masks) in enumerate(loop):
             iteration += 1
-            
             inputs, true_masks = inputs.to(args.device), true_masks.to(args.device)
             masks_pred=model(inputs)
 
             loss = args.criterion(masks_pred,true_masks)
+            loss += dice_loss(F.sigmoid(masks_pred.squeeze(1)), true_masks.float())
+            
             running_loss += loss.item()
 
             masks_pred = masks_pred.argmax(1)
@@ -84,7 +80,6 @@ def eval(model, args, val_loader):
                 saved_images[1] = true_masks[1].cpu().numpy()
                 saved_images[2] = masks_pred[1].cpu().numpy()
                 
-                
     val_loss = running_loss/iteration
     dice_score = dice_score/iteration
 
@@ -96,12 +91,12 @@ def main():
     # Training settings
     parser = argparse.ArgumentParser(description='Information Removal at the bottleneck in Deep Neural Networks')
     parser.add_argument('--batch-size', type=int, default=32, metavar='N', help='input batch size for training (default: 32)')
-    parser.add_argument('--epochs', type=int, default=100, metavar='N', help='number of epochs to train (default: 100)')
-    parser.add_argument('--lr', type=float, default=5e-4, metavar='LR', help='learning rate (default: 0.0001)')
-    parser.add_argument('--weight_decay', type=float, default=0.00005)
+    parser.add_argument('--epochs', type=int, default=200, metavar='N', help='number of epochs to train (default: 100)')
+    parser.add_argument('--lr', type=float, default=1e-4, metavar='LR', help='learning rate (default: 0.0001)')
+    parser.add_argument('--weight_decay', type=float, default=0.0005)
     parser.add_argument('--dev', default="cuda:1")
-    parser.add_argument('--momentum-sgd', type=float, default=0.9, metavar='M', help='Momentum')
-    parser.add_argument('--datapath', default='LPCVCDataset')
+    parser.add_argument('--momentum-sgd', type=float, default=None, metavar='M', help='Momentum')
+    parser.add_argument('--BN', type=bool, default=False)
     parser.add_argument('--name', default='RUN')
     args = parser.parse_args()
 
@@ -109,36 +104,33 @@ def main():
     if args.dev != "cpu":
         torch.cuda.set_device(args.device)
 
-    model = UNet(in_chans=3, nclass=2).to(args.device)
+    model = UNet(in_chans=3, nclass=2, batch_norm = True).to(args.device)
 
-    # transform = A.Compose([A.Resize(width=IMG_SIZE[1], height=IMG_SIZE[0], interpolation=cv2.INTER_NEAREST)])
-    
-    # aug_data = v2.Compose([
-    #     v2.RandomHorizontalFlip(p=0.5),
-    #     v2.RandomVerticalFlip(p=0.5),
-    #     v2.RandomRotation(degrees=[-60, 60]),
-    # ])
+    # Data Augmentation
+    aug_data1 = v2.Compose([
+        v2.RandomHorizontalFlip(p=0.5),
+        v2.RandomVerticalFlip(p=0.5),
+        v2.RandomRotation(degrees=[-60,60]),
+    ])
+    aug_data2 = v2.ColorJitter(brightness=[0.7, 1.3], contrast=[0.7, 1.3], saturation=[0.7, 1.3])
     
     train_dataset = SegmentationDataset(
         datapath='/home/infres/jsun-22/Documents/IMA205/Medical_classification/Dataset/Train_seg',
-        # augmentation = aug_data,
+        augmentation = [aug_data1, aug_data2],
         train=True
     )
     val_dataset = SegmentationDataset(
         datapath='/home/infres/jsun-22/Documents/IMA205/Medical_classification/Dataset/Test_seg',
-        # transform=transform, 
         train=False
     )
-
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
 
-    args.criterion = torch.nn.BCEWithLogitsLoss()
-    
-    args.optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(args.optimizer, T_0=10, T_mult=2, eta_min=1e-5)
 
-    wandb.init(project="IMA205")
+    args.criterion = torch.nn.BCEWithLogitsLoss()
+    args.optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+
+    wandb.init(project="IMA205", dir="tmp/")
     wandb.run.name = args.name
     wandb.config.epochs = args.epochs
     wandb.config.batch_size = args.batch_size
@@ -151,7 +143,7 @@ def main():
 
     for epoch in range(1, args.epochs+1):
         print('\nEpoch : %d'%epoch)
-        train_loss = train(model, args, train_loader)
+        train_loss = train(model, args, train_loader, epoch)
         val_loss,dice_score, saved_images = eval(model, args, val_loader)
 
         input_image, target_image, pred_image = saved_images[0], saved_images[1], saved_images[2]
@@ -169,15 +161,15 @@ def main():
             "learning rate": args.optimizer.param_groups[0]['lr']
             })
 
-        if epoch > 30 and epoch % 20 == 0:
+        if (epoch > 100 and epoch % 5 == 0) or (epoch in [30,50,100]):
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': args.optimizer.state_dict(),
-            }, 'checkpoints/' + args.name + "_epoch" + str(epoch) +'.pth')
+            }, 'checkpoints2/' + args.name + "_epoch" + str(epoch) +'.pth')
             
-
-        scheduler.step(dice_score)
+        if args.sched in [0,1]:
+            args.scheduler.step()
 
     wandb.finish()
 
